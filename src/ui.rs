@@ -1,60 +1,56 @@
-use fltk::{app, button, frame, window, input, menu, group, browser, prelude::*, enums::*};
+use fltk::{app, button, enums::*, frame, prelude::*, window};
 
-// ---------------------------------------------------------------------------
-// Color palette — change values here to restyle the whole UI at once.
-// ---------------------------------------------------------------------------
+use crate::pages::clicker::build_clicker_page;
+use crate::pages::processes::build_processes_page;
+use crate::pages::settings::build_settings_page;
 
-/// Main window / content-area background.
-pub const CLR_BACKGROUND:     (u8, u8, u8) = (11,  11,  11);
-/// Title bar, minimize button, and close button background.
-pub const CLR_TITLEBAR:       (u8, u8, u8) = (26,  26,  26);
-/// Border between title bar and content area.
-pub const CLR_BORDER:         (u8, u8, u8) = (51,  51,  51);
-/// Input and dropdown background.
-pub const CLR_WIDGET:         (u8, u8, u8) = (30,  30,  30);
-/// Inactive status-badge background.
-pub const CLR_BADGE_INACTIVE: (u8, u8, u8) = (45,  45,  45);
-/// Secondary label text (field labels, checkbox).
-pub const CLR_LABEL:          (u8, u8, u8) = (180, 180, 180);
-/// Title-bar icon text (— ×).
-pub const CLR_ICON:           (u8, u8, u8) = (200, 200, 200);
-/// Footer / hint text.
-pub const CLR_FOOTER:         (u8, u8, u8) = (100, 100, 100);
-/// Start button and always-on-top checkmark.
-pub const CLR_GREEN:          (u8, u8, u8) = (58,  150, 109);
-/// Hover tint for the start button.
-pub const CLR_GREEN_HOVER:    (u8, u8, u8) = (70,  180, 130);
-/// Stop button, active badge, and close-button hover.
-pub const CLR_RED:            (u8, u8, u8) = (209, 73,  73);
-/// Hover tint for the stop button.
-pub const CLR_RED_HOVER:      (u8, u8, u8) = (230, 90,  90);
-/// Minimize button hover tint.
-pub const CLR_TITLEBAR_HOVER: (u8, u8, u8) = (50,  50,  50);
+pub const CLR_BACKGROUND: (u8, u8, u8) = (11, 11, 11);
+pub const CLR_TITLEBAR: (u8, u8, u8) = (26, 26, 26);
+pub const CLR_BORDER: (u8, u8, u8) = (51, 51, 51);
+pub const CLR_WIDGET: (u8, u8, u8) = (30, 30, 30);
+pub const CLR_BADGE_INACTIVE: (u8, u8, u8) = (45, 45, 45);
+pub const CLR_LABEL: (u8, u8, u8) = (180, 180, 180);
+pub const CLR_FOOTER: (u8, u8, u8) = (100, 100, 100);
+pub const CLR_GREEN: (u8, u8, u8) = (58, 150, 109);
+pub const CLR_GREEN_HOVER: (u8, u8, u8) = (70, 180, 130);
+pub const CLR_RED: (u8, u8, u8) = (209, 73, 73);
+pub const CLR_RED_HOVER: (u8, u8, u8) = (230, 90, 90);
+pub const CLR_TITLEBAR_HOVER: (u8, u8, u8) = (90, 90, 90);
+pub const CLR_TAB_ACTIVE: (u8, u8, u8) = (70, 70, 70);
 
-/// Helper so call sites stay readable: `col(CLR_BACKGROUND)`.
 #[inline(always)]
 pub fn col(c: (u8, u8, u8)) -> Color {
     Color::from_rgb(c.0, c.1, c.2)
 }
 
-// ---------------------------------------------------------------------------
-
-/// Handles to the widgets that need to be wired up with callbacks in main.
 pub struct UiHandles {
     pub wind: window::Window,
     pub close_btn: button::Button,
     pub min_btn: button::Button,
     pub always_on_top_btn: button::CheckButton,
+    pub minimize_to_tray_btn: button::CheckButton,
+    pub pause_on_window_change_btn: button::CheckButton,
     pub start_stop_btn: button::Button,
     pub status_badge: frame::Frame,
+    pub current_hotkey: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    pub is_listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    pub skip_next_hotkey: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    pub interval_ms: std::sync::Arc<std::sync::atomic::AtomicI32>,
+
+    pub click_type_index: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    pub filter_mode_choice: fltk::menu::Choice,
+    pub processes_browser: fltk::browser::HoldBrowser,
 }
 
-/// Constructs all widgets and returns handles needed for event wiring.
-pub fn build_ui() -> UiHandles {
-    // --- WINDOW ---
+pub fn build_ui(
+    settings: &crate::settings_io::AppSettings,
+    tx: std::sync::mpsc::Sender<()>,
+) -> UiHandles {
     let (sw, sh) = app::screen_size();
-    let win_w = 340;
-    let win_h = 380;
+    let win_w = 390;
+    let win_h = 365;
     let x = ((sw as i32) - win_w) / 2;
     let y = ((sh as i32) - win_h) / 2;
     let mut wind = window::Window::default()
@@ -64,307 +60,114 @@ pub fn build_ui() -> UiHandles {
     wind.set_border(false);
     wind.set_color(col(CLR_BACKGROUND));
 
-    // --- TITLE BAR ---
-    let mut title_bar = frame::Frame::default()
-        .with_size(340, 35)
-        .with_pos(0, 0);
-    title_bar.set_color(col(CLR_TITLEBAR));
-    title_bar.set_frame(FrameType::FlatBox);
-    title_bar.set_label("Tree AutoClicker");
-    title_bar.set_label_color(Color::White);
-    title_bar.set_label_font(Font::HelveticaBold);
-    title_bar.set_label_size(13);
-    title_bar.set_align(Align::Center | Align::Inside);
+    let mut title_bar_bg = frame::Frame::default().with_size(win_w, 35).with_pos(0, 0);
+    title_bar_bg.set_color(col(CLR_TITLEBAR));
+    title_bar_bg.set_frame(FrameType::FlatBox);
 
-    // --- TAB BAR AREA ---
-    let mut tab_bar = frame::Frame::default()
-        .with_size(340, 35)
-        .with_pos(0, 35);
-    tab_bar.set_color(col(CLR_TITLEBAR));
-    tab_bar.set_frame(FrameType::FlatBox);
+    let mut title_text = frame::Frame::default().with_size(160, 35).with_pos(115, 0);
+    title_text.set_label("Tree AutoClicker");
+    title_text.set_label_color(Color::White);
+    title_text.set_label_font(Font::HelveticaBold);
+    title_text.set_label_size(13);
+    title_text.set_align(Align::Center | Align::Inside);
 
-    // --- TAB BUTTONS ---
-    let mut tab_clicker = button::Button::default()
-        .with_size(80, 26)
-        .with_pos(20, 39);
-    tab_clicker.set_label("Clicker");
-    tab_clicker.set_label_font(Font::HelveticaBold);
-    tab_clicker.set_label_size(12);
-    tab_clicker.set_color(col(CLR_BACKGROUND));
-    tab_clicker.set_label_color(Color::White);
-    tab_clicker.set_frame(FrameType::RFlatBox);
-    tab_clicker.clear_visible_focus();
+    let tab_sz = 25;
+    let tab_y = (35 - tab_sz) / 2;
 
     let mut tab_settings = button::Button::default()
-        .with_size(80, 26)
-        .with_pos(105, 39);
-    tab_settings.set_label("Settings");
-    tab_settings.set_label_font(Font::Helvetica);
-    tab_settings.set_label_size(12);
+        .with_size(tab_sz, tab_sz)
+        .with_pos(5, tab_y);
+    tab_settings.set_label("⚙️");
+    tab_settings.set_label_color(Color::White);
+    tab_settings.set_label_size(14);
     tab_settings.set_color(col(CLR_TITLEBAR));
-    tab_settings.set_label_color(col(CLR_LABEL));
+    tab_settings.set_selection_color(col(CLR_TITLEBAR));
     tab_settings.set_frame(FrameType::RFlatBox);
     tab_settings.clear_visible_focus();
 
+    let mut tab_clicker = button::Button::default()
+        .with_size(tab_sz, tab_sz)
+        .with_pos(35, tab_y);
+    tab_clicker.set_label("🖱️");
+    tab_clicker.set_label_color(Color::White);
+    tab_clicker.set_label_size(14);
+    tab_clicker.set_color(col(CLR_TAB_ACTIVE));
+    tab_clicker.set_selection_color(col(CLR_TAB_ACTIVE));
+    tab_clicker.set_frame(FrameType::RFlatBox);
+    tab_clicker.clear_visible_focus();
+
     let mut tab_processes = button::Button::default()
-        .with_size(90, 26)
-        .with_pos(190, 39);
-    tab_processes.set_label("Processes");
-    tab_processes.set_label_font(Font::Helvetica);
-    tab_processes.set_label_size(12);
+        .with_size(tab_sz, tab_sz)
+        .with_pos(65, tab_y);
+    tab_processes.set_label("📋");
+    tab_processes.set_label_color(Color::White);
+    tab_processes.set_label_size(14);
     tab_processes.set_color(col(CLR_TITLEBAR));
-    tab_processes.set_label_color(col(CLR_LABEL));
+    tab_processes.set_selection_color(col(CLR_TITLEBAR));
     tab_processes.set_frame(FrameType::RFlatBox);
     tab_processes.clear_visible_focus();
 
-    // --- MINIMIZE BUTTON ---
-    let mut min_btn = button::Button::default()
-        .with_size(35, 35)
-        .with_pos(270, 0);
+    let mut min_btn = button::Button::default().with_size(30, 25).with_pos(320, 5);
     min_btn.set_label("—");
-    min_btn.set_label_color(col(CLR_ICON));
+    min_btn.set_label_color(Color::White);
     min_btn.set_label_size(12);
     min_btn.set_color(col(CLR_TITLEBAR));
-    min_btn.set_frame(FrameType::FlatBox);
+    min_btn.set_selection_color(Color::from_rgb(80, 80, 80));
+    min_btn.set_frame(FrameType::RFlatBox);
     min_btn.clear_visible_focus();
 
-    // --- CLOSE BUTTON ---
-    let mut close_btn = button::Button::default()
-        .with_size(35, 35)
-        .with_pos(305, 0);
+    let mut close_btn = button::Button::default().with_size(30, 25).with_pos(355, 5);
     close_btn.set_label("×");
-    close_btn.set_label_color(col(CLR_ICON));
+    close_btn.set_label_color(Color::White);
     close_btn.set_label_size(18);
     close_btn.set_color(col(CLR_TITLEBAR));
-    close_btn.set_frame(FrameType::FlatBox);
+    close_btn.set_selection_color(col(CLR_RED_HOVER));
+    close_btn.set_frame(FrameType::RFlatBox);
     close_btn.clear_visible_focus();
 
-    // --- BORDER ---
-    let mut border = frame::Frame::default()
-        .with_size(340, 2)
-        .with_pos(0, 70);
+    let mut border = frame::Frame::default().with_size(win_w, 2).with_pos(0, 35);
     border.set_color(col(CLR_BORDER));
     border.set_frame(FrameType::FlatBox);
 
-    // --- CONTENT BACKGROUND ---
     let mut content_area = frame::Frame::default()
-        .with_size(340, 308)
-        .with_pos(0, 72);
+        .with_size(win_w, 328)
+        .with_pos(0, 37);
     content_area.set_color(col(CLR_BACKGROUND));
     content_area.set_frame(FrameType::FlatBox);
 
-    // --- GROUP 1: CLICKER PAGE ---
-    let clicker_group = group::Group::default()
-        .with_size(340, 308)
-        .with_pos(0, 72);
+    let clicker_handles = build_clicker_page(
+        0,
+        37,
+        win_w,
+        328,
+        settings.interval_ms,
+        settings.click_type_index,
+        tx.clone(),
+    );
+    let settings_handles = build_settings_page(
+        0,
+        37,
+        win_w,
+        328,
+        settings.always_on_top,
+        settings.minimize_to_tray,
+        settings.pause_on_window_change,
+        settings.current_hotkey,
+        tx.clone(),
+    );
+    let processes_handles = build_processes_page(
+        0,
+        37,
+        win_w,
+        328,
+        settings.filter_mode,
+        settings.processes.clone(),
+        tx.clone(),
+    );
 
-    let mut status_panel = frame::Frame::default()
-        .with_size(300, 45)
-        .with_pos(20, 85);
-    status_panel.set_color(col(CLR_TITLEBAR));
-    status_panel.set_frame(FrameType::RFlatBox);
-
-    let mut status_title = frame::Frame::default()
-        .with_size(80, 45)
-        .with_pos(35, 85);
-    status_title.set_label("Status:");
-    status_title.set_label_color(col(CLR_LABEL));
-    status_title.set_label_font(Font::HelveticaBold);
-    status_title.set_label_size(13);
-    status_title.set_align(Align::Left | Align::Inside);
-
-    let mut status_badge = frame::Frame::default()
-        .with_size(100, 26)
-        .with_pos(205, 94);
-    status_badge.set_frame(FrameType::RFlatBox);
-    status_badge.set_color(col(CLR_BADGE_INACTIVE));
-    status_badge.set_label("INACTIVE");
-    status_badge.set_label_color(Color::White);
-    status_badge.set_label_font(Font::HelveticaBold);
-    status_badge.set_label_size(11);
-
-    let mut interval_label = frame::Frame::default()
-        .with_size(140, 30)
-        .with_pos(20, 145);
-    interval_label.set_label("Click Interval (ms)");
-    interval_label.set_label_color(col(CLR_LABEL));
-    interval_label.set_label_font(Font::Helvetica);
-    interval_label.set_label_size(13);
-    interval_label.set_align(Align::Left | Align::Inside);
-
-    let mut interval_input = input::IntInput::default()
-        .with_size(110, 30)
-        .with_pos(210, 145);
-    interval_input.set_value("100");
-    interval_input.set_color(col(CLR_WIDGET));
-    interval_input.set_text_color(Color::White);
-    interval_input.set_text_font(Font::Helvetica);
-    interval_input.set_text_size(13);
-    interval_input.set_frame(FrameType::RFlatBox);
-    interval_input.clear_visible_focus();
-
-    let mut click_type_label = frame::Frame::default()
-        .with_size(140, 30)
-        .with_pos(20, 195);
-    click_type_label.set_label("Click Type");
-    click_type_label.set_label_color(col(CLR_LABEL));
-    click_type_label.set_label_font(Font::Helvetica);
-    click_type_label.set_label_size(13);
-    click_type_label.set_align(Align::Left | Align::Inside);
-
-    let mut click_type_choice = menu::Choice::default()
-        .with_size(110, 30)
-        .with_pos(210, 195);
-    click_type_choice.set_color(col(CLR_WIDGET));
-    click_type_choice.set_text_color(Color::White);
-    click_type_choice.set_text_font(Font::Helvetica);
-    click_type_choice.set_text_size(13);
-    click_type_choice.set_frame(FrameType::RFlatBox);
-    click_type_choice.add_choice("Left");
-    click_type_choice.add_choice("Right");
-    click_type_choice.add_choice("Middle");
-    click_type_choice.set_value(0);
-    click_type_choice.clear_visible_focus();
-
-    let mut start_stop_btn = button::Button::default()
-        .with_size(300, 50)
-        .with_pos(20, 255);
-    start_stop_btn.set_label("START");
-    start_stop_btn.set_label_color(Color::White);
-    start_stop_btn.set_label_font(Font::HelveticaBold);
-    start_stop_btn.set_label_size(16);
-    start_stop_btn.set_color(col(CLR_GREEN));
-    start_stop_btn.set_frame(FrameType::RFlatBox);
-    start_stop_btn.clear_visible_focus();
-
-    clicker_group.end();
-
-    // --- GROUP 2: SETTINGS PAGE ---
-    let mut settings_group = group::Group::default()
-        .with_size(340, 308)
-        .with_pos(0, 72);
-
-    let mut always_on_top_btn = button::CheckButton::default()
-        .with_size(300, 30)
-        .with_pos(20, 85);
-    always_on_top_btn.set_label("Always on Top");
-    always_on_top_btn.set_label_color(col(CLR_LABEL));
-    always_on_top_btn.set_label_font(Font::Helvetica);
-    always_on_top_btn.set_label_size(13);
-    always_on_top_btn.set_selection_color(col(CLR_GREEN));
-    always_on_top_btn.clear_visible_focus();
-
-    let mut hotkey_label = frame::Frame::default()
-        .with_size(140, 30)
-        .with_pos(20, 135);
-    hotkey_label.set_label("Start/Stop Hotkey");
-    hotkey_label.set_label_color(col(CLR_LABEL));
-    hotkey_label.set_label_font(Font::Helvetica);
-    hotkey_label.set_label_size(13);
-    hotkey_label.set_align(Align::Left | Align::Inside);
-
-    let mut hotkey_choice = menu::Choice::default()
-        .with_size(110, 30)
-        .with_pos(210, 135);
-    hotkey_choice.set_color(col(CLR_WIDGET));
-    hotkey_choice.set_text_color(Color::White);
-    hotkey_choice.set_text_font(Font::Helvetica);
-    hotkey_choice.set_text_size(13);
-    hotkey_choice.set_frame(FrameType::RFlatBox);
-    hotkey_choice.add_choice("F1");
-    hotkey_choice.add_choice("F2");
-    hotkey_choice.add_choice("F3");
-    hotkey_choice.add_choice("F4");
-    hotkey_choice.add_choice("F5");
-    hotkey_choice.add_choice("F6");
-    hotkey_choice.add_choice("F7");
-    hotkey_choice.add_choice("F8");
-    hotkey_choice.add_choice("F9");
-    hotkey_choice.add_choice("F10");
-    hotkey_choice.add_choice("F11");
-    hotkey_choice.add_choice("F12");
-    hotkey_choice.set_value(9);
-    hotkey_choice.clear_visible_focus();
-
-    settings_group.end();
-    settings_group.hide();
-
-    // --- GROUP 3: PROCESSES PAGE ---
-    let mut processes_group = group::Group::default()
-        .with_size(340, 308)
-        .with_pos(0, 72);
-
-    let mut mode_label = frame::Frame::default()
-        .with_size(100, 30)
-        .with_pos(20, 85);
-    mode_label.set_label("Filter Mode");
-    mode_label.set_label_color(col(CLR_LABEL));
-    mode_label.set_label_font(Font::Helvetica);
-    mode_label.set_label_size(13);
-    mode_label.set_align(Align::Left | Align::Inside);
-
-    let mut mode_choice = menu::Choice::default()
-        .with_size(180, 30)
-        .with_pos(140, 85);
-    mode_choice.set_color(col(CLR_WIDGET));
-    mode_choice.set_text_color(Color::White);
-    mode_choice.set_text_font(Font::Helvetica);
-    mode_choice.set_text_size(13);
-    mode_choice.set_frame(FrameType::RFlatBox);
-    mode_choice.add_choice("Blacklist (Disable click)");
-    mode_choice.add_choice("Whitelist (Enable click)");
-    mode_choice.set_value(0);
-    mode_choice.clear_visible_focus();
-
-    let mut proc_input = input::Input::default()
-        .with_size(210, 30)
-        .with_pos(20, 130);
-    proc_input.set_color(col(CLR_WIDGET));
-    proc_input.set_text_color(Color::White);
-    proc_input.set_text_font(Font::Helvetica);
-    proc_input.set_text_size(13);
-    proc_input.set_frame(FrameType::RFlatBox);
-    proc_input.clear_visible_focus();
-    
-    let mut add_btn = button::Button::default()
-        .with_size(80, 30)
-        .with_pos(240, 130);
-    add_btn.set_label("Add");
-    add_btn.set_label_font(Font::HelveticaBold);
-    add_btn.set_label_size(13);
-    add_btn.set_color(col(CLR_GREEN));
-    add_btn.set_label_color(Color::White);
-    add_btn.set_frame(FrameType::RFlatBox);
-    add_btn.clear_visible_focus();
-
-    let mut list_browser = browser::HoldBrowser::default()
-        .with_size(210, 140)
-        .with_pos(20, 175);
-    list_browser.set_color(col(CLR_WIDGET));
-    list_browser.set_text_size(13);
-    list_browser.set_frame(FrameType::RFlatBox);
-    list_browser.clear_visible_focus();
-    list_browser.add("notepad.exe");
-    list_browser.add("chrome.exe");
-
-    let mut remove_btn = button::Button::default()
-        .with_size(80, 30)
-        .with_pos(240, 175);
-    remove_btn.set_label("Remove");
-    remove_btn.set_label_font(Font::HelveticaBold);
-    remove_btn.set_label_size(13);
-    remove_btn.set_color(col(CLR_RED));
-    remove_btn.set_label_color(Color::White);
-    remove_btn.set_frame(FrameType::RFlatBox);
-    remove_btn.clear_visible_focus();
-
-    processes_group.end();
-    processes_group.hide();
-
-    // --- FOOTER ---
     let mut footer = frame::Frame::default()
-        .with_size(300, 25)
-        .with_pos(20, 337);
+        .with_size(win_w, 25)
+        .with_pos(0, 337);
     footer.set_label("Tree AutoClicker");
     footer.set_label_color(col(CLR_FOOTER));
     footer.set_label_font(Font::HelveticaItalic);
@@ -373,135 +176,84 @@ pub fn build_ui() -> UiHandles {
 
     wind.end();
 
-    // --- TAB CALLBACKS ---
-    let mut cg_c = clicker_group.clone();
-    let mut sg_c = settings_group.clone();
-    let mut pg_c = processes_group.clone();
-    let mut tc_c = tab_clicker.clone();
-    let mut ts_c = tab_settings.clone();
-    let mut tp_c = tab_processes.clone();
-    let mut w_c = wind.clone();
-    tab_clicker.set_callback(move |_| {
-        cg_c.show();
-        sg_c.hide();
-        pg_c.hide();
-        
-        tc_c.set_color(col(CLR_BACKGROUND));
-        tc_c.set_label_color(Color::White);
-        tc_c.set_label_font(Font::HelveticaBold);
+    let tabs = vec![
+        tab_settings.clone(),
+        tab_clicker.clone(),
+        tab_processes.clone(),
+    ];
+    let groups = vec![
+        settings_handles.group.clone(),
+        clicker_handles.group.clone(),
+        processes_handles.group.clone(),
+    ];
 
-        ts_c.set_color(col(CLR_TITLEBAR));
-        ts_c.set_label_color(col(CLR_LABEL));
-        ts_c.set_label_font(Font::Helvetica);
+    for i in 0..tabs.len() {
+        let mut tab = tabs[i].clone();
+        let tabs_clone = tabs.clone();
+        let mut groups_clone = groups.clone();
+        let mut wind_clone = wind.clone();
 
-        tp_c.set_color(col(CLR_TITLEBAR));
-        tp_c.set_label_color(col(CLR_LABEL));
-        tp_c.set_label_font(Font::Helvetica);
-        
-        w_c.redraw();
-    });
+        tab.set_callback(move |_| {
+            for (j, g) in groups_clone.iter_mut().enumerate() {
+                if i == j {
+                    g.show();
+                } else {
+                    g.hide();
+                }
+            }
+            for (j, mut t) in tabs_clone.clone().into_iter().enumerate() {
+                let color = if i == j {
+                    col(CLR_TAB_ACTIVE)
+                } else {
+                    col(CLR_TITLEBAR)
+                };
+                t.set_color(color);
+                t.set_selection_color(color);
+            }
+            wind_clone.redraw();
+        });
+    }
 
-    let mut cg_s = clicker_group.clone();
-    let mut sg_s = settings_group.clone();
-    let mut pg_s = processes_group.clone();
-    let mut tc_s = tab_clicker.clone();
-    let mut ts_s = tab_settings.clone();
-    let mut tp_s = tab_processes.clone();
-    let mut w_s = wind.clone();
-    tab_settings.set_callback(move |_| {
-        cg_s.hide();
-        sg_s.show();
-        pg_s.hide();
-        
-        tc_s.set_color(col(CLR_TITLEBAR));
-        tc_s.set_label_color(col(CLR_LABEL));
-        tc_s.set_label_font(Font::Helvetica);
-
-        ts_s.set_color(col(CLR_BACKGROUND));
-        ts_s.set_label_color(Color::White);
-        ts_s.set_label_font(Font::HelveticaBold);
-
-        tp_s.set_color(col(CLR_TITLEBAR));
-        tp_s.set_label_color(col(CLR_LABEL));
-        tp_s.set_label_font(Font::Helvetica);
-        
-        w_s.redraw();
-    });
-
-    let mut cg_p = clicker_group.clone();
-    let mut sg_p = settings_group.clone();
-    let mut pg_p = processes_group.clone();
-    let mut tc_p = tab_clicker.clone();
-    let mut ts_p = tab_settings.clone();
-    let mut tp_p = tab_processes.clone();
-    let mut w_p = wind.clone();
-    tab_processes.set_callback(move |_| {
-        cg_p.hide();
-        sg_p.hide();
-        pg_p.show();
-        
-        tc_p.set_color(col(CLR_TITLEBAR));
-        tc_p.set_label_color(col(CLR_LABEL));
-        tc_p.set_label_font(Font::Helvetica);
-
-        ts_p.set_color(col(CLR_TITLEBAR));
-        ts_p.set_label_color(col(CLR_LABEL));
-        ts_p.set_label_font(Font::Helvetica);
-
-        tp_p.set_color(col(CLR_BACKGROUND));
-        tp_p.set_label_color(Color::White);
-        tp_p.set_label_font(Font::HelveticaBold);
-        
-        w_p.redraw();
-    });
-
-    // --- ADD/REMOVE PROCESS CALLBACKS ---
-    let mut browser_clone = list_browser.clone();
-    let input_clone = proc_input.clone();
-    add_btn.set_callback(move |_| {
-        let val = input_clone.value().trim().to_string();
-        if !val.is_empty() {
-            browser_clone.add(&val);
-            let mut input_mut = input_clone.clone();
-            input_mut.set_value("");
-        }
-    });
-
-    let mut browser_clone2 = list_browser.clone();
-    remove_btn.set_callback(move |_| {
-        let selected = browser_clone2.value();
-        if selected > 0 {
-            browser_clone2.remove(selected);
-        }
-    });
-
-    // Suppress unused-variable warnings for widgets not returned
-    let _ = (title_bar, tab_bar, border, content_area, status_panel, status_title,
-             interval_label, interval_input, click_type_label, click_type_choice,
-             hotkey_label, hotkey_choice, mode_label, mode_choice, proc_input,
-             add_btn, list_browser, remove_btn, tab_clicker, tab_settings, tab_processes,
-             clicker_group, settings_group, processes_group, footer);
+    let _ = (
+        title_bar_bg,
+        title_text,
+        border,
+        content_area,
+        tab_clicker,
+        tab_settings,
+        tab_processes,
+        footer,
+    );
 
     UiHandles {
         wind,
         close_btn,
         min_btn,
-        always_on_top_btn,
-        start_stop_btn,
-
-        status_badge,
+        always_on_top_btn: settings_handles.always_on_top_btn,
+        minimize_to_tray_btn: settings_handles.minimize_to_tray_btn,
+        pause_on_window_change_btn: settings_handles.pause_on_window_change_btn,
+        start_stop_btn: clicker_handles.start_stop_btn,
+        status_badge: clicker_handles.status_badge,
+        current_hotkey: settings_handles.current_hotkey,
+        is_listening: settings_handles.is_listening,
+        skip_next_hotkey: settings_handles.skip_next_hotkey,
+        interval_ms: clicker_handles.interval_ms,
+        click_type_index: clicker_handles.click_type_index,
+        filter_mode_choice: processes_handles.filter_mode_choice,
+        processes_browser: processes_handles.processes_browser,
     }
 }
 
-/// Updates the start/stop button and status badge to reflect the current active state.
 pub fn update_button_style(btn: &mut button::Button, badge: &mut frame::Frame, active: bool) {
     if active {
         btn.set_color(col(CLR_RED));
+        btn.set_selection_color(col(CLR_RED_HOVER));
         btn.set_label("STOP");
         badge.set_color(col(CLR_RED));
         badge.set_label("ACTIVE");
     } else {
         btn.set_color(col(CLR_GREEN));
+        btn.set_selection_color(col(CLR_GREEN_HOVER));
         btn.set_label("START");
         badge.set_color(col(CLR_BADGE_INACTIVE));
         badge.set_label("INACTIVE");
@@ -510,10 +262,10 @@ pub fn update_button_style(btn: &mut button::Button, badge: &mut frame::Frame, a
     badge.redraw();
 }
 
-/// Attaches title-bar drag-to-move behaviour to the window.
-/// Only drags when the push originates in the top bar (y <= 35) and
-/// not over the window-control buttons (x < 230).
-pub fn attach_drag_handler(wind: &mut window::Window) {
+pub fn setup_window_events(
+    wind: &mut window::Window,
+    _is_listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let mut drag_offset_x = 0;
     let mut drag_offset_y = 0;
     let mut is_dragging = false;
@@ -522,7 +274,7 @@ pub fn attach_drag_handler(wind: &mut window::Window) {
         Event::Push => {
             let ex = app::event_x();
             let ey = app::event_y();
-            if ey >= 0 && ey <= 35 && ex >= 0 && ex < 270 {
+            if ey >= 0 && ey <= 35 && ex >= 0 && ex < 320 {
                 drag_offset_x = app::event_x_root() - w.x();
                 drag_offset_y = app::event_y_root() - w.y();
                 is_dragging = true;
@@ -545,6 +297,40 @@ pub fn attach_drag_handler(wind: &mut window::Window) {
         }
         Event::Released => {
             is_dragging = false;
+            true
+        }
+        _ => false,
+    });
+}
+
+pub fn add_hover_effect<T: WidgetExt + WidgetBase + 'static>(
+    mut widget: T,
+    normal_color: Color,
+    hover_color: Color,
+) {
+    widget.handle(move |w: &mut T, ev| match ev {
+        Event::Enter => {
+            w.set_color(hover_color);
+            match w.window() {
+                Some(mut win) => {
+                    win.redraw();
+                }
+                _ => {
+                    w.redraw();
+                }
+            }
+            true
+        }
+        Event::Leave => {
+            w.set_color(normal_color);
+            match w.window() {
+                Some(mut win) => {
+                    win.redraw();
+                }
+                _ => {
+                    w.redraw();
+                }
+            }
             true
         }
         _ => false,

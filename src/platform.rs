@@ -1,10 +1,11 @@
 use fltk::{prelude::*, window};
+use std::sync::atomic::{AtomicPtr, Ordering as AOrdering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
-#[cfg(target_os = "windows")]
 #[link(name = "dwmapi")]
-extern "system" {
-    /// Sets a DWM window attribute.
-    /// See: https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmsetwindowattribute
+unsafe extern "system" {
+
     fn DwmSetWindowAttribute(
         hwnd: *mut std::ffi::c_void,
         dwAttribute: u32,
@@ -13,9 +14,147 @@ extern "system" {
     ) -> i32;
 }
 
-#[cfg(target_os = "windows")]
+#[repr(C)]
+struct KbdllHookStruct {
+    vk_code: u32,
+    scan_code: u32,
+    flags: u32,
+    time: u32,
+    dw_extra_info: usize,
+}
+
+std::thread_local! {
+    static HOOK_SENDER: std::cell::RefCell<Option<mpsc::SyncSender<u32>>> =
+        std::cell::RefCell::new(None);
+}
+
+static HOOK_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
+    fn SetWindowsHookExW(
+        id_hook: i32,
+        lpfn: unsafe extern "system" fn(i32, usize, isize) -> isize,
+        h_mod: *mut std::ffi::c_void,
+        dw_thread_id: u32,
+    ) -> *mut std::ffi::c_void;
+
+    fn UnhookWindowsHookEx(hhk: *mut std::ffi::c_void) -> i32;
+
+    fn CallNextHookEx(
+        hhk: *mut std::ffi::c_void,
+        n_code: i32,
+        w_param: usize,
+        l_param: isize,
+    ) -> isize;
+
+    fn GetMessageW(
+        lp_msg: *mut [u32; 7],
+        hwnd: *mut std::ffi::c_void,
+        w_msg_filter_min: u32,
+        w_msg_filter_max: u32,
+    ) -> i32;
+
+    fn PostThreadMessageW(id_thread: u32, msg: u32, w_param: usize, l_param: isize) -> i32;
+
+    fn GetCurrentThreadId() -> u32;
+
+    fn GetDC(hWnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn ReleaseDC(hWnd: *mut std::ffi::c_void, hDC: *mut std::ffi::c_void) -> i32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn GetDeviceCaps(hDC: *mut std::ffi::c_void, nIndex: i32) -> i32;
+}
+
+pub fn get_monitor_refresh_rate() -> u32 {
+    unsafe {
+        let dc = GetDC(std::ptr::null_mut());
+        if dc.is_null() {
+            return 60;
+        }
+
+        let rate = GetDeviceCaps(dc, 116);
+        ReleaseDC(std::ptr::null_mut(), dc);
+        if rate > 0 {
+            rate as u32
+        } else {
+            60
+        }
+    }
+}
+
+unsafe extern "system" fn ll_keyboard_proc(n_code: i32, w_param: usize, l_param: isize) -> isize {
+    unsafe {
+        if n_code >= 0 && (w_param == 0x0100 || w_param == 0x0104) {
+            let info = &*(l_param as *const KbdllHookStruct);
+
+            if info.dw_extra_info != crate::clicker_engine::EXTRA_INFO {
+                HOOK_SENDER.with(|cell| {
+                    if let Some(tx) = cell.borrow().as_ref() {
+                        let _ = tx.try_send(info.vk_code);
+                    }
+                });
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
+    }
+}
+
+pub struct GlobalHookGuard {
+    pump_thread_id: u32,
+}
+
+impl Drop for GlobalHookGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let hhk = HOOK_HANDLE.load(AOrdering::SeqCst);
+            if !hhk.is_null() {
+                UnhookWindowsHookEx(hhk);
+                HOOK_HANDLE.store(std::ptr::null_mut(), AOrdering::SeqCst);
+            }
+
+            PostThreadMessageW(self.pump_thread_id, 0x0012, 0, 0);
+        }
+    }
+}
+
+pub fn install_global_hook() -> (GlobalHookGuard, Receiver<u32>) {
+    let (tx, rx) = mpsc::sync_channel::<u32>(32);
+    let pump_tid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let pump_tid_clone = pump_tid.clone();
+
+    std::thread::spawn(move || {
+        HOOK_SENDER.with(|cell| {
+            *cell.borrow_mut() = Some(tx);
+        });
+
+        let tid = unsafe { GetCurrentThreadId() };
+        pump_tid_clone.store(tid, AOrdering::SeqCst);
+
+        let hhk = unsafe { SetWindowsHookExW(13, ll_keyboard_proc, std::ptr::null_mut(), 0) };
+        HOOK_HANDLE.store(hhk, AOrdering::SeqCst);
+
+        let mut msg = [0u32; 7];
+        loop {
+            let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
+            if ret <= 0 {
+                break;
+            }
+        }
+    });
+
+    while pump_tid.load(AOrdering::SeqCst) == 0 {
+        std::hint::spin_loop();
+    }
+    let id = pump_tid.load(AOrdering::SeqCst);
+
+    (GlobalHookGuard { pump_thread_id: id }, rx)
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
     fn SetWindowPos(
         hWnd: *mut std::ffi::c_void,
         hWndInsertAfter: *mut std::ffi::c_void,
@@ -39,92 +178,98 @@ extern "system" {
     #[cfg(target_pointer_width = "32")]
     #[link_name = "GetWindowLongW"]
     fn GetWindowLongPtrW(hWnd: *mut std::ffi::c_void, nIndex: i32) -> isize;
+
+    fn GetForegroundWindow() -> *mut std::ffi::c_void;
 }
 
-/// Applies native Windows 11 rounded corners and the system accent border
-/// using the DWM API. Falls back silently on older Windows versions.
 pub fn apply_windows_style(wind: &mut window::Window) {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = wind.raw_handle();
-        if !hwnd.is_null() {
-            unsafe {
-                // DWMWA_WINDOW_CORNER_PREFERENCE = 33
-                // DWMWCP_ROUND = 2  (same rounded corners Windows uses for all its own windows)
-                let corner_pref: u32 = 2;
-                DwmSetWindowAttribute(
-                    hwnd,
-                    33,
-                    &corner_pref as *const u32 as *const std::ffi::c_void,
-                    std::mem::size_of::<u32>() as u32,
-                );
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        unsafe {
+            let corner_pref: u32 = 2;
+            DwmSetWindowAttribute(
+                hwnd,
+                33,
+                &corner_pref as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
 
-                // DWMWA_BORDER_COLOR = 34
-                // COLORREF format is 0x00BBGGRR; RGB(30,30,30) = 0x001E1E1E
-                let border_color: u32 = 0x001E_1E1E;
-                DwmSetWindowAttribute(
-                    hwnd,
-                    34,
-                    &border_color as *const u32 as *const std::ffi::c_void,
-                    std::mem::size_of::<u32>() as u32,
-                );
-            }
+            let border_color: u32 = 0x001E_1E1E;
+            DwmSetWindowAttribute(
+                hwnd,
+                34,
+                &border_color as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
         }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = wind;
     }
 }
 
 pub fn set_window_topmost(wind: &mut window::Window, topmost: bool) {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = wind.raw_handle();
-        if !hwnd.is_null() {
-            let hwnd_insert_after = if topmost {
-                -1isize as *mut std::ffi::c_void
-            } else {
-                -2isize as *mut std::ffi::c_void
-            };
-            unsafe {
-                SetWindowPos(hwnd, hwnd_insert_after, 0, 0, 0, 0, 0x0001 | 0x0002);
-            }
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        let hwnd_insert_after = if topmost {
+            -1isize as *mut std::ffi::c_void
+        } else {
+            -2isize as *mut std::ffi::c_void
+        };
+        unsafe {
+            SetWindowPos(hwnd, hwnd_insert_after, 0, 0, 0, 0, 0x0001 | 0x0002);
         }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = wind;
-        let _ = topmost;
     }
 }
 
 pub fn show_in_taskbar(wind: &mut window::Window) {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = wind.raw_handle();
-        if !hwnd.is_null() {
-            unsafe {
-                let style = GetWindowLongPtrW(hwnd, -20); // GWL_EXSTYLE = -20
-                SetWindowLongPtrW(hwnd, -20, style | 0x00040000); // WS_EX_APPWINDOW = 0x00040000
-                // Refresh window frame so Windows re-reads the new style
-                SetWindowPos(
-                    hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0x0020 | 0x0002 | 0x0001 | 0x0004 | 0x0010 | 0x0200,
-                );
-                // Hide and show the window to force the Shell to update the taskbar
-                ShowWindow(hwnd, 0); // SW_HIDE = 0
-                ShowWindow(hwnd, 5); // SW_SHOW = 5
-            }
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, -20);
+            SetWindowLongPtrW(hwnd, -20, style | 0x00040000);
+
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                0x0020 | 0x0002 | 0x0001 | 0x0004 | 0x0010 | 0x0200,
+            );
+
+            ShowWindow(hwnd, 0);
+            ShowWindow(hwnd, 5);
         }
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = wind;
+}
+
+pub fn hide_window(wind: &mut window::Window) {
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, 0);
+        }
     }
+}
+
+pub fn minimize_window(wind: &mut window::Window) {
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, 6);
+        }
+    }
+}
+
+pub fn show_window(wind: &mut window::Window) {
+    let hwnd = wind.raw_handle();
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, 5);
+            ShowWindow(hwnd, 9);
+        }
+    }
+}
+
+pub fn get_foreground_window() -> *mut std::ffi::c_void {
+    unsafe { GetForegroundWindow() }
 }
