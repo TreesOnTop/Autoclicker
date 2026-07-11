@@ -1,6 +1,6 @@
-use crate::pages::widgets::{build_label, SegmentedControl};
+use crate::pages::widgets::{SegmentedControl, build_label};
 use crate::settings_io::ProcessEntry;
-use crate::ui::{col, CLR_BADGE_INACTIVE, CLR_GREEN, CLR_LABEL, CLR_RED, CLR_WIDGET};
+use crate::ui::{CLR_BADGE_INACTIVE, CLR_GREEN, CLR_LABEL, CLR_RED, CLR_ROW_ALT, CLR_WIDGET, col};
 use fltk::{
     button,
     enums::*,
@@ -8,6 +8,7 @@ use fltk::{
     group::{self, Scroll, ScrollType},
     prelude::*,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub struct ProcessesHandles {
@@ -101,7 +102,7 @@ pub fn build_processes_page(
     let initial_rows = build_initial_entries(&open_procs, &initial_processes);
 
     {
-        let mut guard = ui_entries.lock().unwrap();
+        let mut guard = ui_entries.lock().unwrap_or_else(|error| error.into_inner());
         *guard = initial_rows.clone();
     }
 
@@ -123,7 +124,10 @@ pub fn build_processes_page(
     let pack_w_wl = pack_w;
     filter_mode_control.set_callback(0, move |_| {
         hdr_action_wl.hide();
-        let entries = ui_entries_wl.lock().unwrap().clone();
+        let entries = ui_entries_wl
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         populate_rows(
             &mut row_pack_wl,
             &scroll_wl,
@@ -144,7 +148,10 @@ pub fn build_processes_page(
     let pack_w_bl = pack_w;
     filter_mode_control.set_callback(1, move |_| {
         hdr_action_bl.show();
-        let entries = ui_entries_bl.lock().unwrap().clone();
+        let entries = ui_entries_bl
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         populate_rows(
             &mut row_pack_bl,
             &scroll_bl,
@@ -166,15 +173,15 @@ pub fn build_processes_page(
     }
 }
 
-
-fn build_initial_entries(
-    open_procs: &[String],
-    saved: &[ProcessEntry],
-) -> Vec<ProcessEntry> {
+fn build_initial_entries(open_procs: &[String], saved: &[ProcessEntry]) -> Vec<ProcessEntry> {
+    let saved_by_name: HashMap<&str, &ProcessEntry> = saved
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect();
     open_procs
         .iter()
         .map(|proc_name| {
-            if let Some(saved_entry) = saved.iter().find(|e| &e.name == proc_name) {
+            if let Some(saved_entry) = saved_by_name.get(proc_name.as_str()) {
                 ProcessEntry::new(proc_name.clone(), saved_entry.action, saved_entry.enabled)
             } else {
                 ProcessEntry::new(proc_name.clone(), 1, false)
@@ -192,11 +199,14 @@ pub fn refresh_process_rows(
     tx: std::sync::mpsc::Sender<()>,
 ) {
     let open_procs = crate::platform::get_open_processes();
-    let current_entries = ui_entries.lock().unwrap().clone();
+    let current_entries = ui_entries
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     let new_entries = build_initial_entries(&open_procs, &current_entries);
 
     {
-        let mut guard = ui_entries.lock().unwrap();
+        let mut guard = ui_entries.lock().unwrap_or_else(|error| error.into_inner());
         *guard = new_entries.clone();
     }
 
@@ -259,10 +269,10 @@ fn build_row(
 
     let mut row_grp = group::Group::default().with_size(row_w, ROW_H);
     row_grp.set_frame(FrameType::FlatBox);
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         row_grp.set_color(col(CLR_WIDGET));
     } else {
-        row_grp.set_color(Color::from_rgb(25, 25, 25));
+        row_grp.set_color(col(CLR_ROW_ALT));
     }
 
     let rx = row_grp.x();
@@ -307,16 +317,15 @@ fn build_row(
 
     row_grp.end();
 
-
     let entries_cb = ui_entries.clone();
     let tx_chk = tx.clone();
     let mut action_for_chk = action_ctrl.clone();
     chk.set_callback(move |b| {
         let enabled = b.value();
-        if let Ok(mut guard) = entries_cb.lock() {
-            if let Some(e) = guard.get_mut(index) {
-                e.enabled = enabled;
-            }
+        if let Ok(mut guard) = entries_cb.lock()
+            && let Some(e) = guard.get_mut(index)
+        {
+            e.enabled = enabled;
         }
         action_for_chk.set_enabled(enabled);
         let _ = tx_chk.send(());
@@ -325,10 +334,10 @@ fn build_row(
     let entries_stop = ui_entries.clone();
     let tx_stop = tx.clone();
     action_ctrl.set_callback(0, move |_| {
-        if let Ok(mut guard) = entries_stop.lock() {
-            if let Some(e) = guard.get_mut(index) {
-                e.action = 0;
-            }
+        if let Ok(mut guard) = entries_stop.lock()
+            && let Some(e) = guard.get_mut(index)
+        {
+            e.action = 0;
         }
         let _ = tx_stop.send(());
     });
@@ -336,12 +345,11 @@ fn build_row(
     let entries_pause = ui_entries.clone();
     let tx_pause = tx.clone();
     action_ctrl.set_callback(1, move |_| {
-        if let Ok(mut guard) = entries_pause.lock() {
-            if let Some(e) = guard.get_mut(index) {
-                e.action = 1;
-            }
+        if let Ok(mut guard) = entries_pause.lock()
+            && let Some(e) = guard.get_mut(index)
+        {
+            e.action = 1;
         }
         let _ = tx_pause.send(());
     });
 }
-

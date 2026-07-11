@@ -1,8 +1,8 @@
-use crate::pages::widgets::{build_label, build_title, SegmentedControl};
-use crate::ui::{col, CLR_GREEN, CLR_WIDGET};
+use crate::pages::widgets::{SegmentedControl, build_label, build_title};
+use crate::ui::{CLR_CARD, CLR_GREEN, CLR_SUBTITLE, CLR_WIDGET, col};
 use fltk::{app, button, enums::*, frame, group, prelude::*};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 pub struct SettingsHandles {
     pub group: group::Group,
@@ -13,6 +13,13 @@ pub struct SettingsHandles {
     pub is_listening: Arc<std::sync::atomic::AtomicBool>,
 
     pub skip_next_hotkey: Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub struct SettingsInitial {
+    pub always_on_top: bool,
+    pub minimize_to_tray: bool,
+    pub pause_on_window_change: bool,
+    pub hotkey: i32,
 }
 
 fn create_custom_toggle(
@@ -46,10 +53,7 @@ pub fn build_settings_page(
     y: i32,
     w: i32,
     h: i32,
-    initial_always_on_top: bool,
-    initial_minimize_to_tray: bool,
-    initial_pause_on_window_change: bool,
-    initial_hotkey: i32,
+    initial: SettingsInitial,
     tx: std::sync::mpsc::Sender<()>,
 ) -> SettingsHandles {
     let mut settings_group = group::Group::default().with_size(w, h).with_pos(x, y);
@@ -58,7 +62,7 @@ pub fn build_settings_page(
         .with_size(w - 20, 230)
         .with_pos(x + 10, y + 10);
     card.set_frame(FrameType::RFlatBox);
-    card.set_color(Color::from_rgb(20, 20, 20));
+    card.set_color(col(CLR_CARD));
 
     let _title = build_title("Behavior", x + 25, y + 20, 200, 20, 14);
 
@@ -70,7 +74,7 @@ pub fn build_settings_page(
         20,
         12,
     );
-    subtitle.set_label_color(Color::from_rgb(150, 150, 150));
+    subtitle.set_label_color(col(CLR_SUBTITLE));
 
     let mut sep = frame::Frame::default()
         .with_size(w - 40, 1)
@@ -82,7 +86,7 @@ pub fn build_settings_page(
 
     let mut aot_subtitle =
         build_label("Keep the window above others.", x + 25, y + 93, 200, 20, 11);
-    aot_subtitle.set_label_color(Color::from_rgb(150, 150, 150));
+    aot_subtitle.set_label_color(col(CLR_SUBTITLE));
 
     let mut always_on_top_btn = button::CheckButton::default()
         .with_size(0, 0)
@@ -91,14 +95,14 @@ pub fn build_settings_page(
     let _aot_seg = create_custom_toggle(
         x + w - 110,
         y + 78,
-        initial_always_on_top,
+        initial.always_on_top,
         &mut always_on_top_btn,
     );
 
     let _mtt_title = build_title("Minimize to Tray", x + 25, y + 120, 150, 20, 13);
 
     let mut mtt_subtitle = build_label("Hide window to system tray.", x + 25, y + 138, 200, 20, 11);
-    mtt_subtitle.set_label_color(Color::from_rgb(150, 150, 150));
+    mtt_subtitle.set_label_color(col(CLR_SUBTITLE));
 
     let mut minimize_to_tray_btn = button::CheckButton::default()
         .with_size(0, 0)
@@ -107,7 +111,7 @@ pub fn build_settings_page(
     let _mtt_seg = create_custom_toggle(
         x + w - 110,
         y + 123,
-        initial_minimize_to_tray,
+        initial.minimize_to_tray,
         &mut minimize_to_tray_btn,
     );
 
@@ -121,7 +125,7 @@ pub fn build_settings_page(
         20,
         11,
     );
-    pwc_subtitle.set_label_color(Color::from_rgb(150, 150, 150));
+    pwc_subtitle.set_label_color(col(CLR_SUBTITLE));
 
     let mut pause_on_window_change_btn = button::CheckButton::default()
         .with_size(0, 0)
@@ -130,7 +134,7 @@ pub fn build_settings_page(
     let _pwc_seg = create_custom_toggle(
         x + w - 110,
         y + 168,
-        initial_pause_on_window_change,
+        initial.pause_on_window_change,
         &mut pause_on_window_change_btn,
     );
 
@@ -140,7 +144,7 @@ pub fn build_settings_page(
         .with_size(w - 20, 68)
         .with_pos(x + 10, y + 250);
     hk_card.set_frame(FrameType::RFlatBox);
-    hk_card.set_color(Color::from_rgb(20, 20, 20));
+    hk_card.set_color(col(CLR_CARD));
 
     let _hk_title = build_title("Start/Stop Hotkey", x + 25, y + 258, 150, 20, 13);
 
@@ -152,7 +156,7 @@ pub fn build_settings_page(
         20,
         11,
     );
-    hk_subtitle.set_label_color(Color::from_rgb(150, 150, 150));
+    hk_subtitle.set_label_color(col(CLR_SUBTITLE));
 
     let mut hotkey_btn = button::Button::default()
         .with_size(80, 24)
@@ -165,8 +169,8 @@ pub fn build_settings_page(
     hotkey_btn.set_frame(FrameType::RFlatBox);
     hotkey_btn.clear_visible_focus();
 
-    let current_hotkey = Arc::new(AtomicI32::new(initial_hotkey));
-    hotkey_btn.set_label(&key_to_str(Key::from_i32(initial_hotkey)));
+    let current_hotkey = Arc::new(AtomicI32::new(initial.hotkey));
+    hotkey_btn.set_label(&key_to_str(Key::from_i32(initial.hotkey)));
 
     let is_listening = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let skip_next_hotkey = Arc::new(std::sync::atomic::AtomicBool::new(false));

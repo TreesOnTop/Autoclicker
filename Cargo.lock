@@ -42,7 +42,6 @@ name = "autoclicker"
 version = "0.1.0"
 dependencies = [
  "fltk",
- "serde",
  "tray-icon",
 ]
 

@@ -1,15 +1,19 @@
 use fltk::{app, button, enums::*, frame, prelude::*, window};
 
-use crate::pages::clicker::build_clicker_page;
+use crate::pages::clicker::{ClickerSpeedInitial, build_clicker_page};
 use crate::pages::processes::{build_processes_page, refresh_process_rows};
-use crate::pages::settings::build_settings_page;
+use crate::pages::settings::{SettingsInitial, build_settings_page};
 
 pub const CLR_BACKGROUND: (u8, u8, u8) = (11, 11, 11);
 pub const CLR_TITLEBAR: (u8, u8, u8) = (26, 26, 26);
 pub const CLR_BORDER: (u8, u8, u8) = (51, 51, 51);
 pub const CLR_WIDGET: (u8, u8, u8) = (30, 30, 30);
+pub const CLR_CARD: (u8, u8, u8) = (20, 20, 20);
+pub const CLR_ROW_ALT: (u8, u8, u8) = (25, 25, 25);
 pub const CLR_BADGE_INACTIVE: (u8, u8, u8) = (45, 45, 45);
 pub const CLR_LABEL: (u8, u8, u8) = (180, 180, 180);
+pub const CLR_SUBTITLE: (u8, u8, u8) = (150, 150, 150);
+pub const CLR_SEGMENT_INACTIVE: (u8, u8, u8) = (160, 160, 160);
 pub const CLR_FOOTER: (u8, u8, u8) = (100, 100, 100);
 pub const CLR_GREEN: (u8, u8, u8) = (58, 150, 109);
 pub const CLR_GREEN_HOVER: (u8, u8, u8) = (70, 180, 130);
@@ -37,8 +41,7 @@ pub struct UiHandles {
 
     pub skip_next_hotkey: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
-    pub interval_ms: std::sync::Arc<std::sync::atomic::AtomicI32>,
-
+    pub speed: crate::speed::SpeedState,
     pub click_type_index: std::sync::Arc<std::sync::atomic::AtomicI32>,
     pub filter_mode_control: crate::pages::widgets::SegmentedControl,
     pub ui_entries: std::sync::Arc<std::sync::Mutex<Vec<crate::settings_io::ProcessEntry>>>,
@@ -140,8 +143,16 @@ pub fn build_ui(
         37,
         win_w,
         328,
-        settings.interval_ms,
-        settings.click_type_index,
+        ClickerSpeedInitial {
+            speed_mode: settings.speed_mode,
+            delay_h: settings.delay_h,
+            delay_m: settings.delay_m,
+            delay_s: settings.delay_s,
+            delay_ms: settings.delay_ms,
+            rate_count: settings.rate_count,
+            rate_unit: settings.rate_unit,
+            click_type_index: settings.click_type_index,
+        },
         tx.clone(),
     );
     let settings_handles = build_settings_page(
@@ -149,10 +160,12 @@ pub fn build_ui(
         37,
         win_w,
         328,
-        settings.always_on_top,
-        settings.minimize_to_tray,
-        settings.pause_on_window_change,
-        settings.current_hotkey,
+        SettingsInitial {
+            always_on_top: settings.always_on_top,
+            minimize_to_tray: settings.minimize_to_tray,
+            pause_on_window_change: settings.pause_on_window_change,
+            hotkey: settings.current_hotkey,
+        },
         tx.clone(),
     );
     let processes_handles = build_processes_page(
@@ -262,7 +275,7 @@ pub fn build_ui(
         current_hotkey: settings_handles.current_hotkey,
         is_listening: settings_handles.is_listening,
         skip_next_hotkey: settings_handles.skip_next_hotkey,
-        interval_ms: clicker_handles.interval_ms,
+        speed: clicker_handles.speed,
         click_type_index: clicker_handles.click_type_index,
         filter_mode_control: processes_handles.filter_mode_control,
         ui_entries: processes_handles.ui_entries,
@@ -287,10 +300,7 @@ pub fn update_button_style(btn: &mut button::Button, badge: &mut frame::Frame, a
     badge.redraw();
 }
 
-pub fn setup_window_events(
-    wind: &mut window::Window,
-    _is_listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+pub fn setup_window_events(wind: &mut window::Window) {
     let mut drag_offset_x = 0;
     let mut drag_offset_y = 0;
     let mut is_dragging = false;
@@ -299,7 +309,7 @@ pub fn setup_window_events(
         Event::Push => {
             let ex = app::event_x();
             let ey = app::event_y();
-            if ey >= 0 && ey <= 35 && ex >= 0 && ex < 320 {
+            if (0..=35).contains(&ey) && (0..320).contains(&ex) {
                 drag_offset_x = app::event_x_root() - w.x();
                 drag_offset_y = app::event_y_root() - w.y();
                 is_dragging = true;

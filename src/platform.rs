@@ -1,7 +1,7 @@
 use fltk::{prelude::*, window};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering as AOrdering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 
 #[link(name = "dwmapi")]
 unsafe extern "system" {
@@ -25,7 +25,7 @@ struct KbdllHookStruct {
 
 std::thread_local! {
     static HOOK_SENDER: std::cell::RefCell<Option<mpsc::SyncSender<u32>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 static HOOK_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -61,11 +61,25 @@ unsafe extern "system" {
 
     fn GetDC(hWnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     fn ReleaseDC(hWnd: *mut std::ffi::c_void, hDC: *mut std::ffi::c_void) -> i32;
+
+    fn GetCaretBlinkTime() -> u32;
 }
 
 #[link(name = "gdi32")]
 unsafe extern "system" {
     fn GetDeviceCaps(hDC: *mut std::ffi::c_void, nIndex: i32) -> i32;
+}
+
+pub fn get_caret_blink_secs() -> Option<f64> {
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    const DEFAULT_MS: u32 = 530;
+
+    let ms = unsafe { GetCaretBlinkTime() };
+    if ms == INFINITE {
+        return None;
+    }
+    let ms = if ms == 0 { DEFAULT_MS } else { ms };
+    Some(ms as f64 / 1000.0)
 }
 
 pub fn get_monitor_refresh_rate() -> u32 {
@@ -77,11 +91,7 @@ pub fn get_monitor_refresh_rate() -> u32 {
 
         let rate = GetDeviceCaps(dc, 116);
         ReleaseDC(std::ptr::null_mut(), dc);
-        if rate > 0 {
-            rate as u32
-        } else {
-            60
-        }
+        if rate > 0 { rate as u32 } else { 60 }
     }
 }
 
@@ -195,7 +205,11 @@ unsafe extern "system" {
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
+    fn OpenProcess(
+        dwDesiredAccess: u32,
+        bInheritHandle: i32,
+        dwProcessId: u32,
+    ) -> *mut std::ffi::c_void;
     fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
 }
 
@@ -259,7 +273,10 @@ unsafe extern "system" fn enum_windows_callback(hwnd: *mut std::ffi::c_void, lpa
         let title = get_window_title(hwnd);
         if !title.is_empty() {
             let proc_name = get_window_process_name(hwnd);
-            if !proc_name.is_empty() && proc_name != "autoclicker.exe" && proc_name != "TreeAutoClicker.exe" {
+            if !proc_name.is_empty()
+                && proc_name != "autoclicker.exe"
+                && proc_name != "TreeAutoClicker.exe"
+            {
                 list.push(proc_name);
             }
         }

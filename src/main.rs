@@ -4,12 +4,14 @@ mod clicker_engine;
 mod pages;
 mod platform;
 mod settings_io;
+mod speed;
 mod ui;
 
 use fltk::{app, prelude::*};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::speed::MAX_DELAY_HOURS;
 use ui::update_button_style;
 
 #[derive(Clone)]
@@ -18,12 +20,11 @@ struct SettingsSaver {
     minimize_to_tray_btn: fltk::button::CheckButton,
     pause_on_window_change_btn: fltk::button::CheckButton,
     current_hotkey: Arc<std::sync::atomic::AtomicI32>,
-    interval_ms: Arc<std::sync::atomic::AtomicI32>,
+    speed: crate::speed::SpeedState,
     click_type_index: Arc<std::sync::atomic::AtomicI32>,
     filter_mode_control: crate::pages::widgets::SegmentedControl,
     ui_entries: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
     shared_filter_mode: Arc<std::sync::atomic::AtomicI32>,
-    shared_processes: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
     corner_stop_tl: u16,
     corner_stop_tr: u16,
     corner_stop_bl: u16,
@@ -40,7 +41,18 @@ impl SettingsSaver {
         let minimize_to_tray = self.minimize_to_tray_btn.value();
         let pause_on_window_change = self.pause_on_window_change_btn.value();
         let current_hotkey = self.current_hotkey.load(Ordering::SeqCst);
-        let interval_ms = self.interval_ms.load(Ordering::SeqCst);
+        let interval_ms = self.speed.sync_interval();
+        let speed_mode = self.speed.mode.load(Ordering::SeqCst);
+        let delay_h = self
+            .speed
+            .delay_h
+            .load(Ordering::SeqCst)
+            .clamp(0, MAX_DELAY_HOURS as i32) as u16;
+        let delay_m = self.speed.delay_m.load(Ordering::SeqCst).clamp(0, 59) as u8;
+        let delay_s = self.speed.delay_s.load(Ordering::SeqCst).clamp(0, 59) as u8;
+        let delay_ms = self.speed.delay_ms.load(Ordering::SeqCst).clamp(0, 999) as u16;
+        let rate_count = self.speed.rate_count.load(Ordering::SeqCst);
+        let rate_unit = self.speed.rate_unit.load(Ordering::SeqCst);
         let click_type_index = self.click_type_index.load(Ordering::SeqCst);
         let filter_mode = self.filter_mode_control.value();
 
@@ -67,10 +79,69 @@ impl SettingsSaver {
             edge_stop_right: self.edge_stop_right,
             edge_stop_bottom: self.edge_stop_bottom,
             edge_stop_left: self.edge_stop_left,
+            speed_mode,
+            delay_h,
+            delay_m,
+            delay_s,
+            delay_ms,
+            rate_count,
+            rate_unit,
             processes,
         };
         settings_io::save_settings(&settings);
     }
+}
+
+#[derive(Clone)]
+struct ClickerControl {
+    is_active: Arc<AtomicBool>,
+    interval_ms: Arc<std::sync::atomic::AtomicI32>,
+    click_type_index: Arc<std::sync::atomic::AtomicI32>,
+    filter_mode: Arc<std::sync::atomic::AtomicI32>,
+    processes: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
+    window_handle: isize,
+    generation: Arc<AtomicU64>,
+}
+
+impl ClickerControl {
+    fn toggle(&self) -> bool {
+        let new_state = !self.is_active.load(Ordering::SeqCst);
+        self.is_active.store(new_state, Ordering::SeqCst);
+        if new_state {
+            clicker_engine::start_from_atomics(
+                self.interval_ms.clone(),
+                self.click_type_index.clone(),
+                self.is_active.clone(),
+                self.filter_mode.clone(),
+                self.processes.clone(),
+                self.window_handle,
+                self.generation.clone(),
+            );
+        } else {
+            clicker_engine::stop(&self.generation);
+        }
+        new_state
+    }
+
+    fn stop(&self) {
+        self.is_active.store(false, Ordering::SeqCst);
+        clicker_engine::stop(&self.generation);
+    }
+}
+
+#[derive(Clone)]
+struct PollState {
+    frame_time: f64,
+    key_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<u32>>>,
+    is_listening: Arc<AtomicBool>,
+    current_hotkey: Arc<std::sync::atomic::AtomicI32>,
+    skip_next_hotkey: Arc<AtomicBool>,
+    clicker: ClickerControl,
+    start_stop_btn: fltk::button::Button,
+    status_badge: fltk::frame::Frame,
+    window: fltk::window::Window,
+    settings_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+    saver: SettingsSaver,
 }
 
 fn main() {
@@ -97,7 +168,7 @@ fn main() {
         current_hotkey,
         is_listening,
         skip_next_hotkey,
-        interval_ms,
+        speed,
         click_type_index,
         filter_mode_control,
         ui_entries,
@@ -152,30 +223,24 @@ fn main() {
         let _ = tx_pwc.send(());
     });
 
-    let is_active = Arc::new(AtomicBool::new(false));
+    wind.show();
 
-    let is_active_toggle = is_active.clone();
-    let interval_ms_toggle = interval_ms.clone();
-    let click_type_index_toggle = click_type_index.clone();
-    let filter_mode_clicker = filter_mode.clone();
-    let processes_clicker = shared_processes.clone();
+    let is_active = Arc::new(AtomicBool::new(false));
+    let clicker = ClickerControl {
+        is_active: is_active.clone(),
+        interval_ms: speed.interval_ms.clone(),
+        click_type_index: click_type_index.clone(),
+        filter_mode: filter_mode.clone(),
+        processes: shared_processes.clone(),
+        window_handle: wind.raw_handle() as isize,
+        generation: Arc::new(AtomicU64::new(0)),
+    };
+
+    let clicker_button = clicker.clone();
     let mut btn_clone = start_stop_btn.clone();
     let mut badge_clone = status_badge.clone();
-    let wind_hwnd_clone = wind.clone();
     start_stop_btn.set_callback(move |_| {
-        let new_state = !is_active_toggle.load(Ordering::SeqCst);
-        is_active_toggle.store(new_state, Ordering::SeqCst);
-        if new_state {
-            let clicker_hwnd = wind_hwnd_clone.raw_handle() as isize;
-            clicker_engine::start_from_atomics(
-                interval_ms_toggle.clone(),
-                click_type_index_toggle.clone(),
-                is_active_toggle.clone(),
-                filter_mode_clicker.clone(),
-                processes_clicker.clone(),
-                clicker_hwnd,
-            );
-        }
+        let new_state = clicker_button.toggle();
         update_button_style(&mut btn_clone, &mut badge_clone, new_state);
     });
 
@@ -206,9 +271,7 @@ fn main() {
         }
     });
 
-    ui::setup_window_events(&mut wind, is_listening.clone());
-
-    wind.show();
+    ui::setup_window_events(&mut wind);
 
     platform::apply_windows_style(&mut wind);
     platform::show_in_taskbar(&mut wind);
@@ -237,12 +300,11 @@ fn main() {
         minimize_to_tray_btn: minimize_to_tray_btn.clone(),
         pause_on_window_change_btn: pause_on_window_change_btn.clone(),
         current_hotkey: current_hotkey.clone(),
-        interval_ms: interval_ms.clone(),
+        speed: speed.clone(),
         click_type_index: click_type_index.clone(),
         filter_mode_control,
         ui_entries: ui_entries.clone(),
         shared_filter_mode: filter_mode.clone(),
-        shared_processes: shared_processes.clone(),
         corner_stop_tl: settings.corner_stop_tl,
         corner_stop_tr: settings.corner_stop_tr,
         corner_stop_bl: settings.corner_stop_bl,
@@ -253,57 +315,46 @@ fn main() {
         edge_stop_left: settings.edge_stop_left,
     };
     schedule_poll(
-        frame_time,
-        key_rx_mutex,
-        is_listening.clone(),
-        current_hotkey.clone(),
-        skip_next_hotkey.clone(),
-        is_active.clone(),
-        interval_ms.clone(),
-        click_type_index.clone(),
-        start_stop_btn.clone(),
-        status_badge.clone(),
-        wind.clone(),
-        rx_mutex,
-        saver,
+        PollState {
+            frame_time,
+            key_rx: key_rx_mutex,
+            is_listening: is_listening.clone(),
+            current_hotkey: current_hotkey.clone(),
+            skip_next_hotkey: skip_next_hotkey.clone(),
+            clicker,
+            start_stop_btn: start_stop_btn.clone(),
+            status_badge: status_badge.clone(),
+            window: wind.clone(),
+            settings_rx: rx_mutex,
+            saver,
+        },
         None,
     );
 
     app.run().unwrap();
 }
 
-fn schedule_poll(
-    frame_time: f64,
-    key_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<u32>>>,
-    is_listening: Arc<AtomicBool>,
-    current_hotkey: Arc<std::sync::atomic::AtomicI32>,
-    skip_next_hk: Arc<AtomicBool>,
-    is_active_hk: Arc<AtomicBool>,
-    interval_ms_hk: Arc<std::sync::atomic::AtomicI32>,
-    click_type_index_hk: Arc<std::sync::atomic::AtomicI32>,
-    mut btn_hk: fltk::button::Button,
-    mut badge_hk: fltk::frame::Frame,
-    mut wind_tray: fltk::window::Window,
-    settings_rx: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
-    saver: SettingsSaver,
-    monitored_window: Option<*mut std::ffi::c_void>,
-) {
-    app::add_timeout3(frame_time, move |_| {
+fn schedule_poll(mut state: PollState, monitored_window: Option<*mut std::ffi::c_void>) {
+    app::add_timeout3(state.frame_time, move |_| {
         let mut next_monitored_window = monitored_window;
-        let is_active = is_active_hk.load(Ordering::SeqCst);
-        if !is_active && btn_hk.label() == "STOP" {
-            update_button_style(&mut btn_hk, &mut badge_hk, false);
+        let is_active = state.clicker.is_active.load(Ordering::SeqCst);
+        if !is_active && state.start_stop_btn.label() == "STOP" {
+            update_button_style(&mut state.start_stop_btn, &mut state.status_badge, false);
         }
 
         if is_active {
-            if saver.pause_on_window_change_btn.value() {
+            if state.saver.pause_on_window_change_btn.value() {
                 let current_fg = platform::get_foreground_window();
-                let my_hwnd = wind_tray.raw_handle();
+                let my_hwnd = state.window.raw_handle();
                 if current_fg != my_hwnd {
                     if let Some(target) = next_monitored_window {
                         if current_fg != target {
-                            is_active_hk.store(false, Ordering::SeqCst);
-                            update_button_style(&mut btn_hk, &mut badge_hk, false);
+                            state.clicker.stop();
+                            update_button_style(
+                                &mut state.start_stop_btn,
+                                &mut state.status_badge,
+                                false,
+                            );
                             next_monitored_window = None;
                         }
                     } else {
@@ -315,28 +366,21 @@ fn schedule_poll(
             next_monitored_window = None;
         }
 
-        if !is_listening.load(Ordering::SeqCst) {
-            if let Ok(rx) = key_rx.try_lock() {
-                while let Ok(vk) = rx.try_recv() {
-                    let fltk_bits = vk_to_fltk_bits(vk);
-                    if fltk_bits == current_hotkey.load(Ordering::SeqCst) {
-                        if skip_next_hk.swap(false, Ordering::SeqCst) {
-                            continue;
-                        }
-                        let new_state = !is_active_hk.load(Ordering::SeqCst);
-                        is_active_hk.store(new_state, Ordering::SeqCst);
-                        if new_state {
-                            clicker_engine::start_from_atomics(
-                                interval_ms_hk.clone(),
-                                click_type_index_hk.clone(),
-                                is_active_hk.clone(),
-                                saver.shared_filter_mode.clone(),
-                                saver.shared_processes.clone(),
-                                wind_tray.raw_handle() as isize,
-                            );
-                        }
-                        update_button_style(&mut btn_hk, &mut badge_hk, new_state);
+        if !state.is_listening.load(Ordering::SeqCst)
+            && let Ok(rx) = state.key_rx.try_lock()
+        {
+            while let Ok(vk) = rx.try_recv() {
+                let fltk_bits = vk_to_fltk_bits(vk);
+                if fltk_bits == state.current_hotkey.load(Ordering::SeqCst) {
+                    if state.skip_next_hotkey.swap(false, Ordering::SeqCst) {
+                        continue;
                     }
+                    let new_state = state.clicker.toggle();
+                    update_button_style(
+                        &mut state.start_stop_btn,
+                        &mut state.status_badge,
+                        new_state,
+                    );
                 }
             }
         }
@@ -348,36 +392,21 @@ fn schedule_poll(
                 ..
             } = event
             {
-                platform::show_window(&mut wind_tray);
+                platform::show_window(&mut state.window);
             }
         }
 
-        if let Ok(rx) = settings_rx.try_lock() {
+        if let Ok(rx) = state.settings_rx.try_lock() {
             let mut changed = false;
             while rx.try_recv().is_ok() {
                 changed = true;
             }
             if changed {
-                saver.save();
+                state.saver.save();
             }
         }
 
-        schedule_poll(
-            frame_time,
-            key_rx.clone(),
-            is_listening.clone(),
-            current_hotkey.clone(),
-            skip_next_hk.clone(),
-            is_active_hk.clone(),
-            interval_ms_hk.clone(),
-            click_type_index_hk.clone(),
-            btn_hk.clone(),
-            badge_hk.clone(),
-            wind_tray.clone(),
-            settings_rx.clone(),
-            saver.clone(),
-            next_monitored_window,
-        );
+        schedule_poll(state.clone(), next_monitored_window);
     });
 }
 
