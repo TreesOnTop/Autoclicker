@@ -20,8 +20,10 @@ struct SettingsSaver {
     current_hotkey: Arc<std::sync::atomic::AtomicI32>,
     interval_ms: Arc<std::sync::atomic::AtomicI32>,
     click_type_index: Arc<std::sync::atomic::AtomicI32>,
-    filter_mode_choice: fltk::menu::Choice,
-    processes_browser: fltk::browser::HoldBrowser,
+    filter_mode_control: crate::pages::widgets::SegmentedControl,
+    ui_entries: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
+    shared_filter_mode: Arc<std::sync::atomic::AtomicI32>,
+    shared_processes: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
 }
 
 impl SettingsSaver {
@@ -32,15 +34,14 @@ impl SettingsSaver {
         let current_hotkey = self.current_hotkey.load(Ordering::SeqCst);
         let interval_ms = self.interval_ms.load(Ordering::SeqCst);
         let click_type_index = self.click_type_index.load(Ordering::SeqCst);
-        let filter_mode = self.filter_mode_choice.value();
+        let filter_mode = self.filter_mode_control.value();
 
-        let mut processes = Vec::new();
-        let size = self.processes_browser.size();
-        for i in 1..=size {
-            if let Some(text) = self.processes_browser.text(i) {
-                processes.push(text);
-            }
-        }
+        self.shared_filter_mode.store(filter_mode, Ordering::SeqCst);
+
+        let processes = match self.ui_entries.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => vec![],
+        };
 
         let settings = settings_io::AppSettings {
             always_on_top,
@@ -66,6 +67,8 @@ fn main() {
 
     app::set_visible_focus(false);
 
+    let filter_mode = Arc::new(std::sync::atomic::AtomicI32::new(settings.filter_mode));
+
     let ui::UiHandles {
         mut wind,
         mut close_btn,
@@ -80,9 +83,11 @@ fn main() {
         skip_next_hotkey,
         interval_ms,
         click_type_index,
-        filter_mode_choice,
-        processes_browser,
+        filter_mode_control,
+        ui_entries,
     } = ui::build_ui(&settings, tx.clone());
+
+    let shared_processes = ui_entries.clone();
 
     let mut wind_close = wind.clone();
     close_btn.set_callback(move |_| {
@@ -136,16 +141,23 @@ fn main() {
     let is_active_toggle = is_active.clone();
     let interval_ms_toggle = interval_ms.clone();
     let click_type_index_toggle = click_type_index.clone();
+    let filter_mode_clicker = filter_mode.clone();
+    let processes_clicker = shared_processes.clone();
     let mut btn_clone = start_stop_btn.clone();
     let mut badge_clone = status_badge.clone();
+    let wind_hwnd_clone = wind.clone();
     start_stop_btn.set_callback(move |_| {
         let new_state = !is_active_toggle.load(Ordering::SeqCst);
         is_active_toggle.store(new_state, Ordering::SeqCst);
         if new_state {
+            let clicker_hwnd = wind_hwnd_clone.raw_handle() as isize;
             clicker_engine::start_from_atomics(
                 interval_ms_toggle.clone(),
                 click_type_index_toggle.clone(),
                 is_active_toggle.clone(),
+                filter_mode_clicker.clone(),
+                processes_clicker.clone(),
+                clicker_hwnd,
             );
         }
         update_button_style(&mut btn_clone, &mut badge_clone, new_state);
@@ -211,8 +223,10 @@ fn main() {
         current_hotkey: current_hotkey.clone(),
         interval_ms: interval_ms.clone(),
         click_type_index: click_type_index.clone(),
-        filter_mode_choice,
-        processes_browser,
+        filter_mode_control,
+        ui_entries: ui_entries.clone(),
+        shared_filter_mode: filter_mode.clone(),
+        shared_processes: shared_processes.clone(),
     };
     schedule_poll(
         frame_time,
@@ -253,6 +267,10 @@ fn schedule_poll(
     app::add_timeout3(frame_time, move |_| {
         let mut next_monitored_window = monitored_window;
         let is_active = is_active_hk.load(Ordering::SeqCst);
+        if !is_active && btn_hk.label() == "STOP" {
+            update_button_style(&mut btn_hk, &mut badge_hk, false);
+        }
+
         if is_active {
             if saver.pause_on_window_change_btn.value() {
                 let current_fg = platform::get_foreground_window();
@@ -288,6 +306,9 @@ fn schedule_poll(
                                 interval_ms_hk.clone(),
                                 click_type_index_hk.clone(),
                                 is_active_hk.clone(),
+                                saver.shared_filter_mode.clone(),
+                                saver.shared_processes.clone(),
+                                wind_tray.raw_handle() as isize,
                             );
                         }
                         update_button_style(&mut btn_hk, &mut badge_hk, new_state);

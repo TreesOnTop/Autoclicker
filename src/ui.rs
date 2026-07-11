@@ -1,7 +1,7 @@
 use fltk::{app, button, enums::*, frame, prelude::*, window};
 
 use crate::pages::clicker::build_clicker_page;
-use crate::pages::processes::build_processes_page;
+use crate::pages::processes::{build_processes_page, refresh_process_rows};
 use crate::pages::settings::build_settings_page;
 
 pub const CLR_BACKGROUND: (u8, u8, u8) = (11, 11, 11);
@@ -40,8 +40,8 @@ pub struct UiHandles {
     pub interval_ms: std::sync::Arc<std::sync::atomic::AtomicI32>,
 
     pub click_type_index: std::sync::Arc<std::sync::atomic::AtomicI32>,
-    pub filter_mode_choice: fltk::menu::Choice,
-    pub processes_browser: fltk::browser::HoldBrowser,
+    pub filter_mode_control: crate::pages::widgets::SegmentedControl,
+    pub ui_entries: std::sync::Arc<std::sync::Mutex<Vec<crate::settings_io::ProcessEntry>>>,
 }
 
 pub fn build_ui(
@@ -187,16 +187,41 @@ pub fn build_ui(
         processes_handles.group.clone(),
     ];
 
+    let row_pack_refresh = processes_handles.row_pack.clone();
+    let scroll_refresh = processes_handles.scroll.clone();
+    let ui_entries_refresh = processes_handles.ui_entries.clone();
+    let filter_mode_refresh = processes_handles.filter_mode_control.clone();
+    let pack_w_refresh = processes_handles.scroll.w() - 17;
+    let tx_refresh = tx.clone();
+
     for i in 0..tabs.len() {
         let mut tab = tabs[i].clone();
         let tabs_clone = tabs.clone();
         let mut groups_clone = groups.clone();
         let mut wind_clone = wind.clone();
 
+        let mut row_pack_cb = row_pack_refresh.clone();
+        let scroll_cb = scroll_refresh.clone();
+        let ui_entries_cb = ui_entries_refresh.clone();
+        let filter_mode_cb = filter_mode_refresh.clone();
+        let pack_w_cb = pack_w_refresh;
+        let tx_cb = tx_refresh.clone();
+
         tab.set_callback(move |_| {
             for (j, g) in groups_clone.iter_mut().enumerate() {
                 if i == j {
                     g.show();
+                    if j == 2 {
+                        let show_actions = filter_mode_cb.value() == 1;
+                        refresh_process_rows(
+                            &mut row_pack_cb,
+                            &scroll_cb,
+                            &ui_entries_cb,
+                            pack_w_cb,
+                            show_actions,
+                            tx_cb.clone(),
+                        );
+                    }
                 } else {
                     g.hide();
                 }
@@ -239,8 +264,8 @@ pub fn build_ui(
         skip_next_hotkey: settings_handles.skip_next_hotkey,
         interval_ms: clicker_handles.interval_ms,
         click_type_index: clicker_handles.click_type_index,
-        filter_mode_choice: processes_handles.filter_mode_choice,
-        processes_browser: processes_handles.processes_browser,
+        filter_mode_control: processes_handles.filter_mode_control,
+        ui_entries: processes_handles.ui_entries,
     }
 }
 

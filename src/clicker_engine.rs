@@ -131,7 +131,21 @@ fn wait_until(deadline: Instant, is_active: &AtomicBool) {
     }
 }
 
-pub fn start(interval_ms: u64, button: ClickButton, is_active: Arc<AtomicBool>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterDecision {
+    Allow,
+    Stop,
+    Pause,
+}
+
+pub fn start(
+    interval_ms: u64,
+    button: ClickButton,
+    is_active: Arc<AtomicBool>,
+    filter_mode: Arc<AtomicI32>,
+    processes: Arc<std::sync::Mutex<Vec<crate::settings_io::ProcessEntry>>>,
+    clicker_hwnd: isize,
+) {
     let interval = Duration::from_millis(interval_ms.max(1));
 
     std::thread::spawn(move || {
@@ -146,19 +160,92 @@ pub fn start(interval_ms: u64, button: ClickButton, is_active: Arc<AtomicBool>) 
                 break;
             }
 
-            send_click(button);
+            let decision = check_filter(&filter_mode, &processes, clicker_hwnd);
+
+            match decision {
+                FilterDecision::Allow => {
+                    send_click(button);
+                }
+                FilterDecision::Stop => {
+                    is_active.store(false, Ordering::Relaxed);
+                    break;
+                }
+                FilterDecision::Pause => {
+                }
+            }
 
             next_click += interval;
         }
     });
 }
 
+fn check_filter(
+    filter_mode: &Arc<AtomicI32>,
+    processes: &Arc<std::sync::Mutex<Vec<crate::settings_io::ProcessEntry>>>,
+    clicker_hwnd: isize,
+) -> FilterDecision {
+    let fg_hwnd = crate::platform::get_foreground_window();
+
+    if fg_hwnd.is_null() {
+        return FilterDecision::Allow;
+    }
+    if fg_hwnd as isize == clicker_hwnd {
+        return FilterDecision::Pause;
+    }
+
+    let title = crate::platform::get_window_title(fg_hwnd).to_lowercase();
+    let proc_name = crate::platform::get_window_process_name(fg_hwnd).to_lowercase();
+
+    let mode = filter_mode.load(Ordering::SeqCst);
+
+    let entries = match processes.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return FilterDecision::Allow,
+    };
+
+    let matched_entry = entries
+        .iter()
+        .filter(|e| e.enabled)
+        .find(|e| {
+            let name_lower = e.name.to_lowercase();
+            !name_lower.is_empty()
+                && (title.contains(&name_lower) || proc_name.contains(&name_lower))
+        });
+
+    match mode {
+        0 => match matched_entry {
+            Some(_) => FilterDecision::Allow,
+            None => FilterDecision::Pause,
+        },
+        _ => match matched_entry {
+            None => FilterDecision::Allow,
+            Some(entry) => {
+                if entry.action == 0 {
+                    FilterDecision::Stop
+                } else {
+                    FilterDecision::Pause
+                }
+            }
+        },
+    }
+}
+
 pub fn start_from_atomics(
     interval_ms_atomic: Arc<AtomicI32>,
     button_index_atomic: Arc<AtomicI32>,
     is_active: Arc<AtomicBool>,
+    filter_mode: Arc<AtomicI32>,
+    processes: Arc<std::sync::Mutex<Vec<crate::settings_io::ProcessEntry>>>,
+    clicker_hwnd: isize,
 ) {
     let interval_ms = interval_ms_atomic.load(Ordering::SeqCst).max(1) as u64;
     let button = ClickButton::from_index(button_index_atomic.load(Ordering::SeqCst));
-    start(interval_ms, button, is_active);
+    start(
+        interval_ms,
+        button,
+        is_active,
+        filter_mode,
+        processes,
+        clicker_hwnd,
+    );
 }

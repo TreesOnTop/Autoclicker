@@ -180,6 +180,102 @@ unsafe extern "system" {
     fn GetWindowLongPtrW(hWnd: *mut std::ffi::c_void, nIndex: i32) -> isize;
 
     fn GetForegroundWindow() -> *mut std::ffi::c_void;
+
+    fn GetWindowTextW(hWnd: *mut std::ffi::c_void, lpString: *mut u16, nMaxCount: i32) -> i32;
+    fn GetWindowTextLengthW(hWnd: *mut std::ffi::c_void) -> i32;
+    fn GetWindowThreadProcessId(hWnd: *mut std::ffi::c_void, lpdwProcessId: *mut u32) -> u32;
+
+    fn EnumWindows(
+        lpEnumFunc: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+        lParam: isize,
+    ) -> i32;
+
+    fn IsWindowVisible(hWnd: *mut std::ffi::c_void) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+}
+
+#[link(name = "psapi")]
+unsafe extern "system" {
+    fn GetModuleBaseNameW(
+        hProcess: *mut std::ffi::c_void,
+        hModule: *mut std::ffi::c_void,
+        lpBaseName: *mut u16,
+        nSize: u32,
+    ) -> u32;
+}
+
+pub fn get_window_title(hwnd: *mut std::ffi::c_void) -> String {
+    if hwnd.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len > 0 {
+            let mut buf = vec![0u16; (len + 1) as usize];
+            let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), len + 1);
+            if copied > 0 {
+                return String::from_utf16_lossy(&buf[0..copied as usize]);
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn get_window_process_name(hwnd: *mut std::ffi::c_void) -> String {
+    if hwnd.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            let proc_handle = OpenProcess(0x1000 | 0x0010, 0, pid);
+            if !proc_handle.is_null() {
+                let mut buf = vec![0u16; 260];
+                let len = GetModuleBaseNameW(
+                    proc_handle,
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                );
+                CloseHandle(proc_handle);
+                if len > 0 {
+                    return String::from_utf16_lossy(&buf[0..len as usize]);
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+unsafe extern "system" fn enum_windows_callback(hwnd: *mut std::ffi::c_void, lparam: isize) -> i32 {
+    let list = unsafe { &mut *(lparam as *mut Vec<String>) };
+    if unsafe { IsWindowVisible(hwnd) } != 0 {
+        let title = get_window_title(hwnd);
+        if !title.is_empty() {
+            let proc_name = get_window_process_name(hwnd);
+            if !proc_name.is_empty() && proc_name != "autoclicker.exe" && proc_name != "TreeAutoClicker.exe" {
+                list.push(proc_name);
+            }
+        }
+    }
+    1
+}
+
+pub fn get_open_processes() -> Vec<String> {
+    let mut processes = Vec::new();
+    unsafe {
+        let lparam = &mut processes as *mut Vec<String> as isize;
+        EnumWindows(enum_windows_callback, lparam);
+    }
+    processes.sort();
+    processes.dedup();
+    processes
 }
 
 pub fn apply_windows_style(wind: &mut window::Window) {
