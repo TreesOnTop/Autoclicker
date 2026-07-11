@@ -24,6 +24,14 @@ struct SettingsSaver {
     ui_entries: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
     shared_filter_mode: Arc<std::sync::atomic::AtomicI32>,
     shared_processes: Arc<std::sync::Mutex<Vec<settings_io::ProcessEntry>>>,
+    corner_stop_tl: u16,
+    corner_stop_tr: u16,
+    corner_stop_bl: u16,
+    corner_stop_br: u16,
+    edge_stop_top: u16,
+    edge_stop_right: u16,
+    edge_stop_bottom: u16,
+    edge_stop_left: u16,
 }
 
 impl SettingsSaver {
@@ -51,6 +59,14 @@ impl SettingsSaver {
             interval_ms,
             click_type_index,
             filter_mode,
+            corner_stop_tl: self.corner_stop_tl,
+            corner_stop_tr: self.corner_stop_tr,
+            corner_stop_bl: self.corner_stop_bl,
+            corner_stop_br: self.corner_stop_br,
+            edge_stop_top: self.edge_stop_top,
+            edge_stop_right: self.edge_stop_right,
+            edge_stop_bottom: self.edge_stop_bottom,
+            edge_stop_left: self.edge_stop_left,
             processes,
         };
         settings_io::save_settings(&settings);
@@ -227,6 +243,14 @@ fn main() {
         ui_entries: ui_entries.clone(),
         shared_filter_mode: filter_mode.clone(),
         shared_processes: shared_processes.clone(),
+        corner_stop_tl: settings.corner_stop_tl,
+        corner_stop_tr: settings.corner_stop_tr,
+        corner_stop_bl: settings.corner_stop_bl,
+        corner_stop_br: settings.corner_stop_br,
+        edge_stop_top: settings.edge_stop_top,
+        edge_stop_right: settings.edge_stop_right,
+        edge_stop_bottom: settings.edge_stop_bottom,
+        edge_stop_left: settings.edge_stop_left,
     };
     schedule_poll(
         frame_time,
